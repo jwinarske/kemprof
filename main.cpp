@@ -12,18 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <libusb.h>
 #include <iostream>
 #include <iomanip>
+#include <sstream>
+
 #include <cassert>
 #include <csignal>
 
-#include "hex_dump.h"
+#include <libusb.h>
+
+#include "hexdump.h"
 #include "packets.h"
 
 #define USB_VENDOR_ID       0x133e
 #define USB_PRODUCT_ID      0x0001
 
+#define CONFIGURATION       0x01
 #define ALT_SETTING         0x00
 
 #define ERR_EXIT(errcode) do { fprintf(stderr, "   %s\n", libusb_strerror((enum libusb_error)errcode)); return -1; } while (0)
@@ -41,14 +45,28 @@ void SignalHandler(int signal) {
     running = false;
 }
 
+static int LIBUSB_CALL
+hotplug_callback_detach(libusb_context *ctx, libusb_device *dev, libusb_hotplug_event event, void *user_data) {
+    (void) ctx;
+    (void) dev;
+    (void) event;
+    (void) user_data;
+    running = false;
+    return 0;
+}
+
 static void transfer_complete_callback_ep1(struct libusb_transfer *xfr) {
     if (xfr->status != LIBUSB_TRANSFER_COMPLETED) {
-        fprintf(stderr, "transfer status ep1: %d\n", xfr->status);
+        if (xfr->status == LIBUSB_TRANSFER_NO_DEVICE) {
+            running = false;
+        } else {
+            fprintf(stderr, "transfer status ep1: %d\n", xfr->status);
+        }
         libusb_free_transfer(xfr);
         return;
     }
 
-    printf("[Rx.1] length:%u, actual_length:%u\n", xfr->length, xfr->actual_length);
+    printf("[Rx.1] length:%u\n", xfr->actual_length);
     std::stringstream ss;
     ss << Hexdump(xfr->buffer, xfr->actual_length);
     printf("%s\n", ss.str().c_str());
@@ -64,12 +82,16 @@ static void transfer_complete_callback_ep1(struct libusb_transfer *xfr) {
 
 static void transfer_complete_callback_ep2(struct libusb_transfer *xfr) {
     if (xfr->status != LIBUSB_TRANSFER_COMPLETED) {
-        fprintf(stderr, "transfer status ep1: %d\n", xfr->status);
+        if (xfr->status == LIBUSB_TRANSFER_NO_DEVICE) {
+            running = false;
+        } else {
+            fprintf(stderr, "transfer status ep2: %d\n", xfr->status);
+        }
         libusb_free_transfer(xfr);
         return;
     }
 
-    printf("[Rx.2] length:%u, actual_length:%u\n", xfr->length, xfr->actual_length);
+    printf("[Rx.2] length:%u\n", xfr->actual_length);
     std::stringstream ss;
     ss << Hexdump(xfr->buffer, xfr->actual_length);
     printf("%s\n", ss.str().c_str());
@@ -152,6 +174,7 @@ int main() {
     libusb_context *ctx = nullptr;
     bool debug_mode = false;
     bool extra_info = true;
+    libusb_hotplug_callback_handle hp;
     int r;
 
     if (debug_mode) {
@@ -161,24 +184,26 @@ int main() {
     }
 
     const struct libusb_version *version = libusb_get_version();
-    std::cout << "Using libusb v" << version->major << "." << version->minor << "." << version->micro << "."
-              << version->nano << std::endl;
+    std::cout << "Using libusb v" <<
+              version->major << "." <<
+              version->minor << "." <<
+              version->micro << "." <<
+              version->nano << std::endl;
 
     r = libusb_setlocale("en");
     if (r < 0) {
-        std::cout << "Invalid or unsupported locale 'en': " << libusb_strerror((enum libusb_error) r);
+        std::cout << "libusb_setlocale: " << libusb_strerror((enum libusb_error) r);
     }
 
     r = libusb_init(&ctx);
     if (r < 0) {
-        std::cerr << "Init error." << std::endl;
+        std::cout << "libusb_init: " << libusb_strerror((enum libusb_error) r);
         return 1;
     }
 
     std::cout << "Opening device " << std::setfill('0') << std::setw(4) << std::right << std::hex << USB_VENDOR_ID
               << ":" << std::setfill('0') << std::setw(4) << std::right << std::hex << USB_PRODUCT_ID << std::endl;
     handle = libusb_open_device_with_vid_pid(ctx, USB_VENDOR_ID, USB_PRODUCT_ID);
-
     if (handle == nullptr) {
         std::cerr << "Could not open device." << std::endl;
         return 1;
@@ -216,7 +241,6 @@ int main() {
     printf("               S/N: %d\n", dev_desc.iSerialNumber);
     printf("           VID:PID: %04X:%04X\n", dev_desc.idVendor, dev_desc.idProduct);
     printf("         bcdDevice: %04X\n", dev_desc.bcdDevice);
-    printf("   iMan:iProd:iSer: %d:%d:%d\n", dev_desc.iManufacturer, dev_desc.iProduct, dev_desc.iSerialNumber);
     printf("          nb confs: %d\n", dev_desc.bNumConfigurations);
 
     printf("\nReading string descriptors:\n");
@@ -271,9 +295,22 @@ int main() {
     }
     printf("\n");
 
-    r = libusb_set_auto_detach_kernel_driver(handle, 1);
-    if (LIBUSB_SUCCESS != r) {
-        fprintf(stderr, "libusb_set_auto_detach_kernel_driver: %s\n", libusb_strerror((enum libusb_error) r));
+    if (libusb_has_capability(LIBUSB_CAP_HAS_HOTPLUG)) {
+        r = libusb_hotplug_register_callback(ctx, LIBUSB_HOTPLUG_EVENT_DEVICE_LEFT, 0, USB_VENDOR_ID, USB_PRODUCT_ID,
+                                             LIBUSB_HOTPLUG_MATCH_ANY, hotplug_callback_detach, nullptr, &hp);
+        if (LIBUSB_SUCCESS != r) {
+            fprintf(stderr, "libusb_hotplug_register_callback: %s\n", libusb_strerror((enum libusb_error) r));
+            libusb_close(handle);
+            libusb_exit(ctx);
+            return EXIT_FAILURE;
+        }
+    }
+
+    if (libusb_has_capability(LIBUSB_CAP_SUPPORTS_DETACH_KERNEL_DRIVER)) {
+        r = libusb_set_auto_detach_kernel_driver(handle, 1);
+        if (LIBUSB_SUCCESS != r) {
+            fprintf(stderr, "libusb_set_auto_detach_kernel_driver: %s\n", libusb_strerror((enum libusb_error) r));
+        }
     }
 
     int config;
@@ -282,8 +319,8 @@ int main() {
         fprintf(stderr, "libusb_get_configuration: %s\n", libusb_strerror((enum libusb_error) r));
     }
 
-    if (config != 1) {
-        r = libusb_set_configuration(handle, 1);
+    if (config != CONFIGURATION) {
+        r = libusb_set_configuration(handle, CONFIGURATION);
         if (LIBUSB_SUCCESS != r) {
             fprintf(stderr, "libusb_set_configuration: %s\n", libusb_strerror((enum libusb_error) r));
         }
@@ -292,56 +329,31 @@ int main() {
     if (LIBUSB_SUCCESS != r) {
         fprintf(stderr, "libusb_get_configuration: %s\n", libusb_strerror((enum libusb_error) r));
     }
-    printf("Configuration: %d\n", config);
+    std::cout << "Configuration: " << config << std::endl;
 
     r = libusb_claim_interface(handle, first_iface);
     if (LIBUSB_SUCCESS != r) {
         fprintf(stderr, "libusb_claim_interface: %s\n", libusb_strerror((enum libusb_error) r));
         assert(false);
     }
-    std::cout << "Interface claimed." << std::endl;
-
-    r = libusb_clear_halt(handle, 0x01);
-    if (LIBUSB_SUCCESS != r) {
-        fprintf(stderr, "libusb_clear_halt: %s\n", libusb_strerror((enum libusb_error) r));
-    }
-    r = libusb_clear_halt(handle, 0x81);
-    if (LIBUSB_SUCCESS != r) {
-        fprintf(stderr, "libusb_clear_halt: %s\n", libusb_strerror((enum libusb_error) r));
-    }
+    std::cout << "Interface "<< first_iface << " claimed" << std::endl;
 
     for (int k = 0; k < conf_desc->interface[first_iface].altsetting[ALT_SETTING].bNumEndpoints; k++) {
         endpoint = &conf_desc->interface[first_iface].altsetting[ALT_SETTING].endpoint[k];
         if ((endpoint->bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) & (LIBUSB_TRANSFER_TYPE_BULK)) {
-            if (endpoint->bEndpointAddress & LIBUSB_ENDPOINT_IN) {
-                if (endpoint->bEndpointAddress == 0x81) {
-                    for (int i = 0; i < 10; i++) {
-                        queue_bulk_read(handle, endpoint->bEndpointAddress, endpoint->wMaxPacketSize,
-                                        transfer_complete_callback_ep1);
-                    }
-                }
+            r = libusb_clear_halt(handle, endpoint->bEndpointAddress);
+            if (LIBUSB_SUCCESS != r) {
+                fprintf(stderr, "libusb_clear_halt: %s\n", libusb_strerror((enum libusb_error) r));
             }
-        }
-    }
-
-    r = libusb_clear_halt(handle, 0x02);
-    if (LIBUSB_SUCCESS != r) {
-        fprintf(stderr, "libusb_clear_halt: %s\n", libusb_strerror((enum libusb_error) r));
-    }
-    r = libusb_clear_halt(handle, 0x82);
-    if (LIBUSB_SUCCESS != r) {
-        fprintf(stderr, "libusb_clear_halt: %s\n", libusb_strerror((enum libusb_error) r));
-    }
-
-    for (int k = 0; k < conf_desc->interface[first_iface].altsetting[ALT_SETTING].bNumEndpoints; k++) {
-        endpoint = &conf_desc->interface[first_iface].altsetting[ALT_SETTING].endpoint[k];
-        if ((endpoint->bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) & (LIBUSB_TRANSFER_TYPE_BULK)) {
-            if (endpoint->bEndpointAddress & LIBUSB_ENDPOINT_IN) {
-                if (endpoint->bEndpointAddress == 0x82) {
-                    for (int i = 0; i < 10; i++) {
-                        queue_bulk_read(handle, endpoint->bEndpointAddress, endpoint->wMaxPacketSize,
-                                        transfer_complete_callback_ep2);
-                    }
+            if (endpoint->bEndpointAddress == 0x81) {
+                for (int i = 0; i < 10; i++) {
+                    queue_bulk_read(handle, endpoint->bEndpointAddress, endpoint->wMaxPacketSize,
+                                    transfer_complete_callback_ep1);
+                }
+            } else if (endpoint->bEndpointAddress == 0x82) {
+                for (int i = 0; i < 10; i++) {
+                    queue_bulk_read(handle, endpoint->bEndpointAddress, endpoint->wMaxPacketSize,
+                                    transfer_complete_callback_ep2);
                 }
             }
         }
@@ -359,15 +371,12 @@ int main() {
     }
 
     r = libusb_release_interface(handle, first_iface);
-    if (r < 0) {
-        std::cout << "Could not release interface." << std::endl;
-        return 1;
+    if (LIBUSB_SUCCESS == r) {
+        std::cout << "Interface released." << std::endl;
     }
-    std::cout << "Interface released." << std::endl;
 
     libusb_close(handle);
     libusb_exit(ctx);
 
-    std::cout << "End of main" << std::endl;
     return 0;
 }
