@@ -238,7 +238,6 @@ int main() {
     int nb_ifaces, first_iface = -1;
     struct libusb_config_descriptor *conf_desc;
     const struct libusb_endpoint_descriptor *endpoint;
-    uint8_t endpoint_in = 0, endpoint_out = 0;    // default IN and OUT endpoints
 
     CALL_CHECK_CLOSE(libusb_get_config_descriptor(dev, 0, &conf_desc), handle);
     printf("              total length: %d\n", conf_desc->wTotalLength);
@@ -257,40 +256,13 @@ int main() {
                    conf_desc->interface[i].altsetting[j].bInterfaceSubClass,
                    conf_desc->interface[i].altsetting[j].bInterfaceProtocol);
             for (int k = 0; k < conf_desc->interface[i].altsetting[j].bNumEndpoints; k++) {
-                struct libusb_ss_endpoint_companion_descriptor *ep_comp = nullptr;
                 endpoint = &conf_desc->interface[i].altsetting[j].endpoint[k];
                 printf("       endpoint[%d].address: %02X\n", k, endpoint->bEndpointAddress);
-                // Use the first bulk IN/OUT endpoints as default
-                if ((endpoint->bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) & (LIBUSB_TRANSFER_TYPE_BULK)) {
-                    if (endpoint->bEndpointAddress & LIBUSB_ENDPOINT_IN) {
-                        if (!endpoint_in)
-                            endpoint_in = endpoint->bEndpointAddress;
-                    } else {
-                        if (!endpoint_out)
-                            endpoint_out = endpoint->bEndpointAddress;
-                    }
-                }
                 printf("           max packet size: %04X\n", endpoint->wMaxPacketSize);
                 printf("          polling interval: %02X\n", endpoint->bInterval);
-                libusb_get_ss_endpoint_companion_descriptor(nullptr, endpoint, &ep_comp);
-                if (ep_comp) {
-                    printf("                 max burst: %02X   (USB 3.0)\n", ep_comp->bMaxBurst);
-                    printf("        bytes per interval: %04X (USB 3.0)\n", ep_comp->wBytesPerInterval);
-                    libusb_free_ss_endpoint_companion_descriptor(ep_comp);
-                }
             }
         }
     }
-
-    unsigned char buff[255];
-    r = libusb_get_descriptor(handle, LIBUSB_DT_STRING, 0x00, buff, sizeof(buff));
-    if (r < 0) {
-        fprintf(stderr, "libusb_get_descriptor: %s\n", libusb_strerror((enum libusb_error) r));
-    }
-    for (int i = 0; i < r; i++) {
-        printf("%02X", buff[i]);
-    }
-    printf("\n");
 
     for (int i = 4; i <= 10; i++) {
         if (libusb_get_string_descriptor_ascii(handle, i, (unsigned char *) string, sizeof(string)) > 0) {
@@ -379,7 +351,6 @@ int main() {
 
     std::signal(SIGINT, SignalHandler);
 
-    int msg_ep1 = 0, msg_ep2 = 0;
     queue_bulk_write(handle, 0x01, msg[0][0].msg, msg[0][0].size, write_complete_callback);
     queue_bulk_write(handle, 0x02, msg[1][0].msg, msg[1][0].size, write_complete_callback);
 
