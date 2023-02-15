@@ -39,6 +39,7 @@ Create USB Device rule to prevent needing `sudo` to access device.
 
 ### Status
 
+* Only tested/working on Linux.  Mac M1 needs some attention to be at parity; later.
 * Hardcoded to Profiler Stage (133e:0001)
 * Connects to Profiler Stage
 * Emulates basic connection with Rig Manager
