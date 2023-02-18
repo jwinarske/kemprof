@@ -66,7 +66,7 @@ static void transfer_complete_callback_ep1(struct libusb_transfer *xfr) {
         return;
     }
 
-    printf("[Rx.1] length:%u\n", xfr->actual_length);
+    printf("[Rx.%d] length:%u\n", xfr->endpoint, xfr->actual_length);
     std::stringstream ss;
     ss << Hexdump(xfr->buffer, xfr->actual_length);
     printf("%s\n", ss.str().c_str());
@@ -91,7 +91,7 @@ static void transfer_complete_callback_ep2(struct libusb_transfer *xfr) {
         return;
     }
 
-    printf("[Rx.2] length:%u\n", xfr->actual_length);
+    printf("[Rx.%d] length:%u\n", xfr->endpoint, xfr->actual_length);
     std::stringstream ss;
     ss << Hexdump(xfr->buffer, xfr->actual_length);
     printf("%s\n", ss.str().c_str());
@@ -136,6 +136,11 @@ static int queue_bulk_write(libusb_device_handle *handle, uint8_t endpoint, unsi
         return -1;
     }
 
+    printf("[Tx.%d] length:%u\n", endpoint, length);
+    std::stringstream ss;
+    ss << Hexdump(data, length);
+    printf("%s\n", ss.str().c_str());
+
     libusb_fill_bulk_transfer(xfr, handle, endpoint, data, length, callback, handle, 3000);
 
     if (libusb_submit_transfer(xfr) < 0) {
@@ -160,10 +165,14 @@ static void write_complete_callback(struct libusb_transfer *xfr) {
 
     if (xfr->endpoint == 0x01) {
         auto idx = msg_ep1++;
-        queue_bulk_write(handle, 0x01, msg[0][idx].msg, msg[0][idx].size, write_complete_callback);
+        if (idx < 36) {
+            queue_bulk_write(handle, 0x01, msg[0][idx].msg, msg[0][idx].size, write_complete_callback);
+        }
     } else if (xfr->endpoint == 0x02) {
         auto idx = msg_ep2++;
-        queue_bulk_write(handle, 0x02, msg[1][idx].msg, msg[1][idx].size, write_complete_callback);
+        if (idx < 12) {
+            queue_bulk_write(handle, 0x02, msg[1][idx].msg, msg[1][idx].size, write_complete_callback);
+        }
     }
 
     libusb_free_transfer(xfr);
@@ -345,6 +354,12 @@ int main() {
             if (LIBUSB_SUCCESS != r) {
                 fprintf(stderr, "libusb_clear_halt: %s\n", libusb_strerror((enum libusb_error) r));
             }
+        }
+    }
+
+    for (int k = 0; k < conf_desc->interface[first_iface].altsetting[ALT_SETTING].bNumEndpoints; k++) {
+        endpoint = &conf_desc->interface[first_iface].altsetting[ALT_SETTING].endpoint[k];
+        if ((endpoint->bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) & (LIBUSB_TRANSFER_TYPE_BULK)) {
             if (endpoint->bEndpointAddress == 0x81) {
                 for (int i = 0; i < 10; i++) {
                     queue_bulk_read(handle, endpoint->bEndpointAddress, endpoint->wMaxPacketSize,
