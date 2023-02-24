@@ -49,7 +49,7 @@ std::ostream &operator<<(std::ostream &out,
 
     out.fill('0');
     for (size_t i = 0; i < dump.mLength; i += RowSize) {
-        out << "0x" << std::setw(6) << std::hex << i << ": ";
+        //out << "0x" << std::setw(6) << std::hex << i << ": ";
         for (size_t j = 0; j < RowSize; ++j) {
             if (i + j < dump.mLength) {
                 out << std::hex << std::setw(2) << static_cast<int>(dump.mData[i + j])
